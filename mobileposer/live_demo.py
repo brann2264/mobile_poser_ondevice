@@ -18,6 +18,7 @@ from articulate.math import *
 from mobileposer.models import *
 from mobileposer.utils.model_utils import *
 from mobileposer.config import *
+import struct
 
 # Configurations 
 USE_PHONE_AS_WATCH = False
@@ -61,8 +62,9 @@ class IMUSet:
         """
         while self._is_reading:
             data, addr = self._imu_socket.recvfrom(1024)
+ 
             data_str = data.decode("utf-8")
-
+            print(data_str)
             a = np.array(data_str.split("#")[0].split(",")).astype(np.float64)
             q = np.array(data_str.split("#")[1].strip("$").split(",")).astype(np.float64)
 
@@ -73,6 +75,7 @@ class IMUSet:
             self._quat_buffer = self._quat_buffer[tranc:] + [quat.astype(float)]
             self._acc_buffer = self._acc_buffer[tranc:] + [-9.8 * acc.astype(float)]
             self.clock.tick()
+
 
     def start_reading(self):
         """
@@ -132,7 +135,7 @@ class IMUSet:
 
 
 def get_input():
-    global running, start_recording
+    global running, start_recordingm
     while running:
         c = input()
         if c == 'q':
@@ -142,11 +145,131 @@ def get_input():
         elif c == 's':
             start_recording = False
 
+def pack_tensor(tensor) -> bytes:
+    arr = np.array(tensor, dtype=np.float32)
+    shape = arr.shape
+    assert shape == (1, 45, 60) or shape == (1,), f"Shape mismatch: got {shape!r}"
+    data = arr.tobytes()
+    buf = struct.pack('<I', len(shape))
+    for d in shape:
+        buf += struct.pack('<I', d)
+    buf += struct.pack('<I', len(data))
+    buf += data
+    return buf
+
+def send_tensors(tensors, connection):
+    body = struct.pack('<I', len(tensors))          
+    for t in tensors:
+        body += pack_tensor(t)
+
+    # prefix with total length
+    packet = struct.pack('<I', len(body)) + body
+    connection.sendall(packet)
+
+
+class PhoneUnpacker:
+    def __init__(self):
+        # holds any bytes we've received but not yet parsed
+        self._buffer = b''
+
+    def unpack_from_phone(self, new_data):
+        """
+        Feed in the next chunk of bytes from conn.recv(), and once
+        we have one full packet, parse out the four tensors and
+        return them as NumPy arrays.  Otherwise return None.
+        """
+        self._buffer += new_data
+
+        # need at least 4 bytes for the total‐length header
+        if len(self._buffer) < 4:
+            return None
+
+        # read the packet length (little‐endian UInt32)
+        total_len = struct.unpack_from('<I', self._buffer, 0)[0]
+
+        # wait until we have the full packet
+        if len(self._buffer) < 4 + total_len:
+            return None
+
+        # extract the packet body and advance the buffer
+        body = self._buffer[4:4 + total_len]
+        self._buffer = self._buffer[4 + total_len:]
+
+        # now parse body:
+        offset = 0
+
+        def read_u32():
+            nonlocal offset
+            val = struct.unpack_from('<I', body, offset)[0]
+            offset += 4
+            return val
+
+        # 1) number of tensors
+        count = read_u32()
+        arrays = []
+
+        for _ in range(count):
+            # 2) rank
+            rank = read_u32()
+            # 3) dims
+            dims = [ read_u32() for _ in range(rank) ]
+            # 4) byte length
+            byte_count = read_u32()
+            # 5) payload
+            chunk = body[offset:offset + byte_count]
+            offset += byte_count
+
+            # build the numpy array
+            arr = np.frombuffer(chunk, dtype=np.float32)
+            arr = arr.reshape(dims)
+            arrays.append(torch.tensor(arr, dtype=torch.float32))
+
+        # return a tuple of the four arrays
+        return tuple(arrays)
+
+
+def reader_phone_loop(conn, model, poses, trans, unity_conn):
+    unpacker = PhoneUnpacker()
+    try:
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                print("Client disconnected.")
+                break
+            
+            #unpack here
+            result = unpacker.unpack_from_phone(data)
+            if result is None:
+                continue
+            pose, pred_joints, vel, contact = result
+
+            # post processing model backbone outputs
+            output = model.process_outputs(pose, pred_joints, vel, contact)
+
+            pred_pose = output[0] # [24, 3, 3]
+            pred_tran = output[2] # [3]
+        
+            # convert rotmatrix to axis angle
+            pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
+
+            if unity_conn is not None:
+                s = ','.join(['%g' % v for v in pose]) + '#' + \
+                    ','.join(['%g' % v for v in pred_tran]) + '$'
+                unity_conn.send(s.encode('utf8'))  
+
+            poses.append(pose)
+            trans.append(pred_tran)
+
+    except Exception as e:
+        print("Reader thread error:", e)
+    finally:
+        conn.close()
 
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--vis", action='store_true')
     parser.add_argument("--save", action='store_true')
+    parser.add_argument("--on_device", action='store_true')
     args = parser.parse_args()
     
     # specify device
@@ -154,6 +277,37 @@ if __name__ == '__main__':
     
     # setup IMU collection
     imu_set = IMUSet(buffer_len=1)
+
+    # load model
+    model = load_model(paths.weights_file)
+
+    n_imus = 5
+    accs, oris = [], []
+    raw_accs, raw_oris = [], []
+    poses, trans = [], []
+
+    model.eval()
+
+    # setup Unity server for visualization
+    unity_conn = None
+    if args.vis:
+        server_for_unity = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_for_unity.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        server_for_unity.bind(('0.0.0.0', 8889))
+        server_for_unity.listen(1)
+        print('Server start. Waiting for unity3d to connect.')
+        unity_conn, unity_addr = server_for_unity.accept()
+
+    if args.on_device:
+        server_for_phone = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_for_phone.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        server_for_phone.bind(('10.105.238.137', 8889))
+        server_for_phone.listen(1)
+        print('Server start. Waiting for phone to connect.')
+        phone_conn, phone_addr = server_for_phone.accept()
+
+        reader = threading.Thread(target=reader_phone_loop, args=(phone_conn, model, poses, trans, unity_conn), daemon=True)
+        reader.start()
 
     # align IMU to SMPL body frame
     input('Put imu 1 aligned with your body reference frame (x = Left, y = Up, z = Forward) and then press any key.')
@@ -177,18 +331,6 @@ if __name__ == '__main__':
     print('\tFinished Calibrating.\nEstimating poses. Press q to quit')
     imu_set.start_reading()
 
-    # load model
-    model = load_model(paths.weights_file)
-
-    # setup Unity server for visualization
-    if args.vis:
-        server_for_unity = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_for_unity.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        server_for_unity.bind(('0.0.0.0', 8889))
-        server_for_unity.listen(1)
-        print('Server start. Waiting for unity3d to connect.')
-        conn, addr = server_for_unity.accept()
-
     running = True
     clock = Clock()
     is_recording = False
@@ -198,16 +340,17 @@ if __name__ == '__main__':
     get_input_thread.setDaemon(True)
     get_input_thread.start()
 
-    n_imus = 5
-    accs, oris = [], []
-    raw_accs, raw_oris = [], []
-    poses, trans = [], []
 
-    model.eval()
     while running:
         # calibration
         clock.tick(datasets.fps)
         ori_raw, acc_raw = imu_set.get_current_buffer() # [buffer_len, 5, 4]
+        
+        if ori_raw.shape == (0,):
+            print(ori_raw.shape)
+            print(acc_raw.shape)
+            continue
+       
         ori_raw = quaternion_to_rotation_matrix(ori_raw).view(-1, n_imus, 3, 3)
         glb_acc = (smpl2imu.matmul(acc_raw.view(-1, n_imus, 3, 1)) - acc_offsets).view(-1, n_imus, 3)
         glb_ori = smpl2imu.matmul(ori_raw).matmul(device2bone)
@@ -219,7 +362,7 @@ if __name__ == '__main__':
         ori = torch.zeros_like(_ori)
 
         # device combo
-        combo = 'lw_rp'
+        combo = 'rw_rp'
         c = amass.combos[combo]
 
         if USE_PHONE_AS_WATCH:
@@ -233,35 +376,41 @@ if __name__ == '__main__':
         
         imu_input = torch.cat([acc.flatten(1), ori.flatten(1)], dim=1)
         # imu_input = torch.cat([_acc[:, c].flatten(1), _ori[:, c].flatten(1)], dim=1)
+    
+        # send input to iphone for on-device model prediction
+        if args.on_device:
+            imu_input, imu_shape = model.process_inputs(imu_input.squeeze(0))
+            send_tensors([imu_input, imu_shape], phone_conn)
+        else:
 
-        # predict pose and translation
-        with torch.no_grad():
-            output = model.forward_online(imu_input.squeeze(0), [imu_input.shape[0]])
-            pred_pose = output[0] # [24, 3, 3]
-            pred_tran = output[2] # [3]
-        
-        # convert rotmatrix to axis angle
-        pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
-        tran = pred_tran
-
-        # keep track of data
-        if args.save:
-            accs.append(glb_acc)
-            oris.append(glb_ori)
-            raw_accs.append(acc_raw)
-            raw_oris.append(ori_raw)
-            poses.append(pred_pose)
-            trans.append(pred_tran)
-
-        # send pose
-        if args.vis:
-            s = ','.join(['%g' % v for v in pose]) + '#' + \
-                ','.join(['%g' % v for v in tran]) + '$'
-            conn.send(s.encode('utf8'))  
+            # predict pose and translation
+            with torch.no_grad():
+                output = model.forward_online(imu_input.squeeze(0), [imu_input.shape[0]])
+                pred_pose = output[0] # [24, 3, 3]
+                pred_tran = output[2] # [3]
             
-            if os.getenv("DEBUG") is not None:
-                print('\r', '(recording)' if is_recording else '', 'Sensor FPS:', imu_set.clock.get_fps(),
-                        '\tOutput FPS:', clock.get_fps(), end='')
+            # convert rotmatrix to axis angle
+            pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
+            tran = pred_tran
+
+        # # keep track of data
+        # if args.save:
+        #     accs.append(glb_acc)
+        #     oris.append(glb_ori)
+        #     raw_accs.append(acc_raw)
+        #     raw_oris.append(ori_raw)
+        #     poses.append(pred_pose)
+        #     trans.append(pred_tran)
+
+            # send pose
+            if args.vis:
+                s = ','.join(['%g' % v for v in pose]) + '#' + \
+                    ','.join(['%g' % v for v in tran]) + '$'
+                unity_conn.send(s.encode('utf8'))  
+                
+                if os.getenv("DEBUG") is not None:
+                    print('\r', '(recording)' if is_recording else '', 'Sensor FPS:', imu_set.clock.get_fps(),
+                            '\tOutput FPS:', clock.get_fps(), end='')
 
     # save data to file for viewer
     if args.save:
@@ -278,6 +427,11 @@ if __name__ == '__main__':
             }
         }
         torch.save(data, paths.dev_data / f'dev_{int(time.time())}.pt')
+    
+    if args.on_device:
+        data = {'pose': torch.cat(poses, dim=0),
+                'tran': torch.cat(trans, dim=0)}
+        torch.save(data, f'phone_{int(time.time())}.pt')
 
     # clean up threads
     get_input_thread.join()

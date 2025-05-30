@@ -16,9 +16,11 @@ import enum
 import numpy as np
 import torch
 
+from .general import normalize_tensor_return_norm_false
+
 
 class RotationRepresentation(enum.Enum):
-    r"""
+    r"""normalize_tensor_return_norm_false
     Rotation representations. Quaternions are in wxyz. Euler angles are in local XYZ.
     """
     AXIS_ANGLE = 0
@@ -174,11 +176,13 @@ def r6d_to_rotation_matrix(r6d: torch.Tensor):
     :return: Rotation matrix tensor of shape [batch_size, 3, 3].
     """
     r6d = r6d.view(-1, 6)
-    column0 = normalize_tensor(r6d[:, 0:3])
-    column1 = normalize_tensor(r6d[:, 3:6] - (column0 * r6d[:, 3:6]).sum(dim=1, keepdim=True) * column0)
+    column0 = normalize_tensor_return_norm_false(r6d[:, 0:3])
+    column1 = normalize_tensor_return_norm_false(r6d[:, 3:6] - (column0 * r6d[:, 3:6]).sum(dim=1, keepdim=True) * column0)
     column2 = column0.cross(column1, dim=1)
     r = torch.stack((column0, column1, column2), dim=-1)
-    r[torch.isnan(r)] = 0
+    # r[torch.isnan(r)] = 0
+    mask = torch.isnan(r)
+    r = torch.where(mask, torch.zeros_like(r), r)
     return r
 
 

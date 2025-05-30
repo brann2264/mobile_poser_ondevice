@@ -26,7 +26,7 @@ class Velocity(L.LightningModule):
         self.bodymodel = ParametricModel(paths.smpl_file, device=self.C.device)
 
         # model definitions
-        self.vel = RNN(self.C.n_output_joints * 3 + self.C.n_imu, 24 * 3, 256, bidirectional=False)  # per-frame velocity of the root joint. 
+        self.vel = RNN(self.C.n_output_joints * 3 + self.C.n_imu, 24 * 3, 256, bidirectional=False, seq_length=torch.tensor([model_config.future_frames+model_config.past_frames]))  # per-frame velocity of the root joint. 
         self.rnn_state = None
 
         # loss function 
@@ -39,12 +39,12 @@ class Velocity(L.LightningModule):
 
     def forward(self, batch, input_lengths=None):
         # forward velocity model
-        vel, _, _ = self.vel(batch, input_lengths)
+        vel, _, _ = self.vel(batch)
         return vel
 
     def forward_online(self, batch, input_lengths=None):
         # forward velocity model
-        vel, _, self.rnn_state = self.vel(batch, input_lengths, self.rnn_state)
+        vel, _, self.rnn_state = self.vel(batch, self.rnn_state)
         return vel
 
     def shared_step(self, batch):

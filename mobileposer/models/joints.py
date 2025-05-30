@@ -26,7 +26,7 @@ class Joints(L.LightningModule):
 
         # model definitions
         self.bodymodel = art.model.ParametricModel(paths.smpl_file, device=self.C.device)
-        self.joints = RNN(self.C.n_imu, 24 * 3, 256) # joint estimation model 
+        self.joints = RNN(self.C.n_imu, 24 * 3, 256, seq_length=torch.tensor([model_config.future_frames+model_config.past_frames])) # joint estimation model 
 
         # loss function 
         self.loss = nn.MSELoss()
@@ -47,7 +47,7 @@ class Joints(L.LightningModule):
 
     def forward(self, batch, input_lengths=None):
         # forward joint model
-        joints, _, _ = self.joints(batch, input_lengths)
+        joints, _, _ = self.joints(batch)
         #joints = self.joints(batch, input_lengths)
         return joints
 

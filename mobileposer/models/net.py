@@ -35,7 +35,7 @@ class MobilePoserNet(L.LightningModule):
 
         # body model
         self.bodymodel = art.model.ParametricModel(paths.smpl_file, device=self.C.device)
-        self.global_to_local_pose = self.bodymodel.inverse_kinematics_R
+        self.         global_to_local_pose = self.bodymodel.inverse_kinematics_R
 
         # model definitions
         self.pose = poser if poser else Poser()                                # pose estimation model
@@ -55,6 +55,7 @@ class MobilePoserNet(L.LightningModule):
         self.num_future_frames = model_config.future_frames
         self.num_total_frames = self.num_past_frames + self.num_future_frames
 
+
         # variables
         self.last_lfoot_pos, self.last_rfoot_pos = (pos.to(self.C.device) for pos in self.feet_pos)
         self.last_root_pos = torch.zeros(3).to(self.C.device)
@@ -63,10 +64,10 @@ class MobilePoserNet(L.LightningModule):
         self.imu = None
         self.rnn_state = None
 
-        if getenv("PHYSICS"):
-            from dynamics import PhysicsOptimizer
-            self.dynamics_optimizer = PhysicsOptimizer(debug=False)
-            self.dynamics_optimizer.reset_states()
+        # if getenv("PHYSICS"):
+        #     from dynamics import PhysicsOptimizer
+        #     self.dynamics_optimizer = PhysicsOptimizer(debug=False)
+        #     self.dynamics_optimizer.reset_states()
 
         # track stats
         self.validation_step_loss = []
@@ -89,14 +90,6 @@ class MobilePoserNet(L.LightningModule):
 
     def _prob_to_weight(self, p):
         return (p.clamp(self.prob_threshold[0], self.prob_threshold[1]) - self.prob_threshold[0]) / (self.prob_threshold[1] - self.prob_threshold[0])
-    
-    def _reduced_global_to_full(self, reduced_pose):
-        pose = art.math.r6d_to_rotation_matrix(reduced_pose).view(-1, joint_set.n_reduced, 3, 3)
-        pose = reduced_pose_to_full(pose.unsqueeze(0)).squeeze(0).view(-1, 24, 3, 3)
-        pred_pose = self.global_to_local_pose(pose)
-        pred_pose[:, joint_set.ignored] = torch.eye(3, device=self.device)
-        pred_pose[:, 0] = pose[:, 0]
-        return pred_pose
 
     def forward(self, batch, input_lengths=None):
         # forward the joint prediction model
@@ -106,9 +99,6 @@ class MobilePoserNet(L.LightningModule):
         pose_input = torch.cat((pred_joints, batch), dim=-1)
         pred_pose = self.pose(pose_input, input_lengths)
         
-        # global pose to local
-        pred_pose = self._reduced_global_to_full(pred_pose)
-
         # forward the foot-ground contact probability model
         tran_input = torch.cat((pred_joints, batch), dim=-1)
         foot_contact = self.foot_contact(tran_input, input_lengths)
@@ -122,6 +112,7 @@ class MobilePoserNet(L.LightningModule):
     def forward_offline(self, imu, input_lengths=None):
         # forward the predcition model
         pose, pred_joints, vel, contact = self.forward(imu, input_lengths)
+        pose = art.math.r6d_to_rotation_matrix(pose).view(-1, 24, 3, 3)
         contact = contact.squeeze(0) 
 
         # compute joints from predicted pose
@@ -176,6 +167,7 @@ class MobilePoserNet(L.LightningModule):
 
         # forward the pose prediction model
         pose, pred_joints, vel, contact = self.forward(imu.unsqueeze(0), [self.num_total_frames])
+        pose = art.math.r6d_to_rotation_matrix(pose).view(-1, 24, 3, 3)
 
         # get pose
         pose = pose[self.num_past_frames].view(-1, 9)
@@ -217,3 +209,53 @@ class MobilePoserNet(L.LightningModule):
             return pose, pred_joints.squeeze(0), self.last_root_pos.clone(), contact
 
         return pose, pred_joints.squeeze(0), self.last_root_pos.clone(), contact
+    
+    def process_inputs(self, data):
+        imu = data.repeat(self.num_total_frames, 1) if self.imu is None else torch.cat((self.imu[1:], data.view(1, -1)))
+        self.imu = imu.squeeze(0)
+
+        return imu.unsqueeze(0), torch.tensor([self.num_total_frames])
+    
+    def _reduced_global_to_full(self, reduced_pose):
+        pose = art.math.r6d_to_rotation_matrix(reduced_pose).view(-1, joint_set.n_reduced, 3, 3)
+        pose = reduced_pose_to_full(pose.unsqueeze(0)).squeeze(0).view(-1, 24, 3, 3)
+        pred_pose = self.global_to_local_pose(pose)
+        pred_pose[:, joint_set.ignored] = torch.eye(3, device=self.device)
+        pred_pose[:, 0] = pose[:, 0]
+        return pred_pose
+    
+    def process_outputs(self, pose, pred_joints, vel, contact):
+        
+        pose = art.math.r6d_to_rotation_matrix(pose).view(-1, 24, 3, 3)
+        # pose = self._reduced_global_to_full(pose)
+
+        # get pose
+        pose = pose[self.num_past_frames].view(-1, 9)
+
+        # compute the joint positions from predicted pose
+        joints = pred_joints.squeeze(0)[self.num_past_frames].view(24, 3)
+
+        # compute translation from foot-contact probability
+        contact = contact[0][self.num_past_frames]
+        lfoot_pos, rfoot_pos = joints[10], joints[11]
+        if contact[0] > contact[1]:
+            contact_vel = self.last_lfoot_pos - lfoot_pos + self.gravity_velocity
+        else:
+            contact_vel = self.last_rfoot_pos - rfoot_pos + self.gravity_velocity
+
+        # velocity from network-based estimation
+        root_vel = vel.view(-1, 24, 3)[:, 0]
+        pred_vel = root_vel[self.num_past_frames] / (datasets.fps/amass.vel_scale)
+        weight = self._prob_to_weight(contact.max())
+        velocity = art.math.lerp(pred_vel, contact_vel, weight)
+
+        # remove penetration
+        current_foot_y = self.current_root_y + min(lfoot_pos[1].item(), rfoot_pos[1].item())
+        if current_foot_y + velocity[1].item() <= self.floor_y:
+            velocity[1] = self.floor_y - current_foot_y
+
+        self.current_root_y += velocity[1].item()
+        self.last_lfoot_pos, self.last_rfoot_pos = lfoot_pos, rfoot_pos
+        self.last_root_pos += velocity
+
+        return pose, joints.squeeze(0), self.last_root_pos.clone(), contact

@@ -29,7 +29,7 @@ class Poser(L.LightningModule):
         self.global_to_local_pose = self.bodymodel.inverse_kinematics_R
 
         # model definitions
-        self.pose = RNN(self.C.n_output_joints*3 + self.C.n_imu, joint_set.n_reduced*6, 256) # pose estimation model
+        self.pose = RNN(self.C.n_output_joints*3 + self.C.n_imu, joint_set.n_reduced*6, 256, seq_length=torch.tensor([model_config.future_frames+model_config.past_frames])) # pose estimation model
 
         # loss function
         self.loss = nn.MSELoss()
@@ -59,7 +59,7 @@ class Poser(L.LightningModule):
 
     def forward(self, batch, input_lengths=None):
         # forward the pose prediction model
-        pred_pose, _, _ = self.pose(batch, input_lengths)
+        pred_pose, _, _ = self.pose(batch)
         return pred_pose
 
     def shared_step(self, batch):

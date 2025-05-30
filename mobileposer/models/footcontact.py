@@ -25,7 +25,7 @@ class FootContact(L.LightningModule):
 
         # model definitions
         self.bodymodel = art.model.ParametricModel(paths.smpl_file, device=self.C.device)
-        self.footcontact = RNN(self.C.n_output_joints * 3 + self.C.n_imu, 2, 64)  # foot-ground probability model
+        self.footcontact = RNN(self.C.n_output_joints * 3 + self.C.n_imu, 2, 64, seq_length=torch.tensor([model_config.future_frames+model_config.past_frames]))  # foot-ground probability model
 
         # loss function (binary cross-entropy)
         self.loss = nn.BCEWithLogitsLoss()
@@ -37,7 +37,7 @@ class FootContact(L.LightningModule):
 
     def forward(self, batch, input_lengths=None):
         # forward foot contact model
-        foot_contact, _, _ = self.footcontact(batch, input_lengths)
+        foot_contact, _, _ = self.footcontact(batch)
         return foot_contact
 
     def shared_step(self, batch):

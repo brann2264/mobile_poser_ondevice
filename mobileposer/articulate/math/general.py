@@ -34,9 +34,23 @@ def normalize_tensor(x: torch.Tensor, dim=-1, return_norm=False):
     :return: Tensor in the same shape. If return_norm is True, norm tensor in shape [*, 1, *] (1 at dim)
              will also be returned (keepdim=True).
     """
-    norm = x.norm(dim=dim, keepdim=True)
+    norm = torch.norm(x, dim=dim, keepdim=True)
     normalized_x = x / norm
     return normalized_x if not return_norm else (normalized_x, norm)
+
+def normalize_tensor_return_norm_false(x: torch.Tensor, dim: int=-1):
+    r"""
+    Normalize a tensor in a specific dimension to unit norm. (torch)
+
+    :param x: Tensor in any shape.
+    :param dim: The dimension to be normalized.
+    :param return_norm: If True, norm(length) tensor will also be returned.
+    :return: Tensor in the same shape. If return_norm is True, norm tensor in shape [*, 1, *] (1 at dim)
+             will also be returned (keepdim=True).
+    """
+    norm = torch.norm(x, dim=dim, keepdim=True)
+    normalized_x = x / norm
+    return normalized_x
 
 
 def append_value(x: torch.Tensor, value: float, dim=-1):

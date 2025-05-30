@@ -125,7 +125,6 @@ class datasets:
     # Window length of IMU and Pose data 
     window_length = 125
 
-
 class joint_set:
     """Joint sets configurations."""
     gravity_velocity = -0.018
