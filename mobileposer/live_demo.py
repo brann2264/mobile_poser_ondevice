@@ -248,7 +248,7 @@ def reader_phone_loop(conn, model, poses, trans, unity_conn):
 
             pred_pose = output[0] # [24, 3, 3]
             pred_tran = output[2] # [3]
-        
+
             # convert rotmatrix to axis angle
             pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
 
@@ -350,7 +350,7 @@ if __name__ == '__main__':
             print(ori_raw.shape)
             print(acc_raw.shape)
             continue
-       
+        
         ori_raw = quaternion_to_rotation_matrix(ori_raw).view(-1, n_imus, 3, 3)
         glb_acc = (smpl2imu.matmul(acc_raw.view(-1, n_imus, 3, 1)) - acc_offsets).view(-1, n_imus, 3)
         glb_ori = smpl2imu.matmul(ori_raw).matmul(device2bone)
@@ -362,7 +362,7 @@ if __name__ == '__main__':
         ori = torch.zeros_like(_ori)
 
         # device combo
-        combo = 'rw_rp'
+        combo = 'rp'
         c = amass.combos[combo]
 
         if USE_PHONE_AS_WATCH:

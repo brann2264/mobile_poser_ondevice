@@ -207,18 +207,18 @@ def matrix_to_quaternion_single(matrix: torch.Tensor) -> torch.Tensor:
 def sensor2global(ori, acc, calibration_quats, device_id):
     """Convert the sensor data to the global inertial frame."""
     device_mean_quat = calibration_quats[device_id]
-    device_mean_quat = torch.tensor(device_mean_quat, dtype=torch.float32)
-    ori = torch.tensor(ori, dtype=torch.float32)
-    acc = torch.tensor(acc, dtype=torch.float32)
+    # device_mean_quat = torch.tensor(device_mean_quat, dtype=torch.float32)
+    # ori = torch.tensor(ori, dtype=torch.float32)
+    # acc = torch.tensor(acc, dtype=torch.float32)
 
-    og_mat = quaternion_to_matrix(ori)
-    global_inertial_frame = quaternion_to_matrix(device_mean_quat)
-    global_mat = torch.matmul(global_inertial_frame.T, og_mat)         # R_g←s
-    global_ori = matrix_to_quaternion_single(global_mat)          # (..., 4)
-    acc_ref   = torch.matmul(og_mat, acc.unsqueeze(-1)).squeeze(-1)
-    global_acc = torch.matmul(global_inertial_frame.T, acc_ref.unsqueeze(-1)).squeeze(-1)
+    # og_mat = quaternion_to_matrix(ori)
+    # global_inertial_frame = quaternion_to_matrix(device_mean_quat)
+    # global_mat = torch.matmul(global_inertial_frame.T, og_mat)         # R_g←s
+    # global_ori = matrix_to_quaternion_single(global_mat)          # (..., 4)
+    # acc_ref   = torch.matmul(og_mat, acc.unsqueeze(-1)).squeeze(-1)
+    # global_acc = torch.matmul(global_inertial_frame.T, acc_ref.unsqueeze(-1)).squeeze(-1)
 
-    return np.array(global_ori), np.array(global_acc)
+    # return np.array(global_ori), np.array(global_acc)
     
     og_mat = R.from_quat(ori).as_matrix() # rotation matrix from quaternion
     global_inertial_frame = R.from_quat(device_mean_quat).as_matrix()
