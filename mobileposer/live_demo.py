@@ -168,7 +168,6 @@ def send_tensors(tensors, connection):
 
 class PhoneUnpacker:
     def __init__(self):
-        # holds any bytes we've received but not yet parsed
         self._buffer = b''
 
     def unpack_from_phone(self, new_data):
@@ -203,27 +202,27 @@ class PhoneUnpacker:
             offset += 4
             return val
 
-        # 1) number of tensors
+        # number of tensors
         count = read_u32()
         arrays = []
 
         for _ in range(count):
-            # 2) rank
+            # rank
             rank = read_u32()
-            # 3) dims
+            # dims
             dims = [ read_u32() for _ in range(rank) ]
-            # 4) byte length
+            # byte length
             byte_count = read_u32()
-            # 5) payload
+            # payload
             chunk = body[offset:offset + byte_count]
             offset += byte_count
 
-            # build the numpy array
+            # build the array
             arr = np.frombuffer(chunk, dtype=np.float32)
             arr = arr.reshape(dims)
             arrays.append(torch.tensor(arr, dtype=torch.float32))
 
-        # return a tuple of the four arrays
+        # return a tuple of the arrays
         return tuple(arrays)
 
 
