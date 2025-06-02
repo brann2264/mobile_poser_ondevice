@@ -224,19 +224,22 @@ class MobilePoserNet(L.LightningModule):
         pred_pose[:, 0] = pose[:, 0]
         return pred_pose
     
-    def process_outputs(self, pose, pred_joints, vel, contact):
-        
-        pose = art.math.r6d_to_rotation_matrix(pose).view(-1, 24, 3, 3)
+    def process_outputs(self, pose, joints, pred_vel, contact):
+        # pose = art.math.r6d_to_rotation_matrix(pose).view(-1, 24, 3, 3)
         # pose = self._reduced_global_to_full(pose)
 
         # get pose
-        pose = pose[self.num_past_frames].view(-1, 9)
+        # pose = pose[self.num_past_frames].view(-1, 9)
 
-        # compute the joint positions from predicted pose
-        joints = pred_joints.squeeze(0)[self.num_past_frames].view(24, 3)
+        # # # compute the joint positions from predicted pose
+        # joints = pred_joints.squeeze(0)[self.num_past_frames].view(24, 3)
 
-        # compute translation from foot-contact probability
-        contact = contact[0][self.num_past_frames]
+        # # # compute translation from foot-contact probability
+        # contact = contact[0][self.num_past_frames]
+        # root_vel = vel.view(-1, 24, 3)[:, 0]
+        # pred_vel = root_vel[self.num_past_frames] / (datasets.fps/amass.vel_scale)
+
+
         lfoot_pos, rfoot_pos = joints[10], joints[11]
         if contact[0] > contact[1]:
             contact_vel = self.last_lfoot_pos - lfoot_pos + self.gravity_velocity
@@ -244,8 +247,7 @@ class MobilePoserNet(L.LightningModule):
             contact_vel = self.last_rfoot_pos - rfoot_pos + self.gravity_velocity
 
         # velocity from network-based estimation
-        root_vel = vel.view(-1, 24, 3)[:, 0]
-        pred_vel = root_vel[self.num_past_frames] / (datasets.fps/amass.vel_scale)
+        
         weight = self._prob_to_weight(contact.max())
         velocity = art.math.lerp(pred_vel, contact_vel, weight)
 
@@ -257,5 +259,22 @@ class MobilePoserNet(L.LightningModule):
         self.current_root_y += velocity[1].item()
         self.last_lfoot_pos, self.last_rfoot_pos = lfoot_pos, rfoot_pos
         self.last_root_pos += velocity
+
+        # Need to implement in Swift
+
+        # lfoot_pos, rfoot_pos = joints[10], joints[11]
+        # if contact[0] > contact[1]:
+        #     contact_vel = self.last_lfoot_pos - lfoot_pos + self.gravity_velocity
+        # else:
+        #     contact_vel = self.last_rfoot_pos - rfoot_pos + self.gravity_velocity
+        # weight = self._prob_to_weight(contact.max())
+        # velocity = art.math.lerp(pred_vel, contact_vel, weight)
+        # current_foot_y = self.current_root_y + min(lfoot_pos[1].item(), rfoot_pos[1].item())
+        # if current_foot_y + velocity[1].item() <= self.floor_y:
+        #     velocity[1] = self.floor_y - current_foot_y
+
+        # self.current_root_y += velocity[1].item()
+        # self.last_lfoot_pos, self.last_rfoot_pos = lfoot_pos, rfoot_pos
+        # self.last_root_pos += velocity
 
         return pose, joints.squeeze(0), self.last_root_pos.clone(), contact

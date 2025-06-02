@@ -166,35 +166,35 @@ def rotation_matrix_to_axis_angle_V2(r: torch.Tensor):
     return result
 
 def rotation_matrix_to_axis_angle(r: torch.Tensor) -> torch.Tensor:
-        """
-        :param r: Tensor of shape (..., 3, 3), a batch of rotation matrices
-        :return: Tensor of shape (..., 3), the corresponding axis-angle vectors
-        """
-        # Flatten batch dims
-        R = r.view(-1, 3, 3)
+    """
+    :param r: Tensor of shape (..., 3, 3), a batch of rotation matrices
+    :return: Tensor of shape (..., 3), the corresponding axis-angle vectors
+    """
+    # Flatten batch dims
+    R = r.view(-1, 3, 3)
 
-        # 1) compute the trace → cos θ
-        tr = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
-        cos_theta = (tr - 1.0) * 0.5
-        cos_theta = cos_theta.clamp(-1.0, 1.0)
+    # 1) compute the trace → cos θ
+    tr = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
+    cos_theta = (tr - 1.0) * 0.5
+    cos_theta = cos_theta.clamp(-1.0, 1.0)
 
-        # 2) recover θ
-        theta = torch.acos(cos_theta)
+    # 2) recover θ
+    theta = torch.acos(cos_theta)
 
-        # 3) compute the "cross-differences" v = [R32-R23, R13-R31, R21-R12]
-        rx = R[..., 2, 1] - R[..., 1, 2]
-        ry = R[..., 0, 2] - R[..., 2, 0]
-        rz = R[..., 1, 0] - R[..., 0, 1]
-        v   = torch.stack((rx, ry, rz), dim=-1)
+    # 3) compute the "cross-differences" v = [R32-R23, R13-R31, R21-R12]
+    rx = R[..., 2, 1] - R[..., 1, 2]
+    ry = R[..., 0, 2] - R[..., 2, 0]
+    rz = R[..., 1, 0] - R[..., 0, 1]
+    v   = torch.stack((rx, ry, rz), dim=-1)
 
-        # 4) normalize to get the rotation axis: axis = v / (2 sin θ)
-        sin_theta = torch.sin(theta).clamp(min=1e-6).unsqueeze(-1)
-        axis = v / (2.0 * sin_theta)
+    # 4) normalize to get the rotation axis: axis = v / (2 sin θ)
+    sin_theta = torch.sin(theta).clamp(min=1e-6).unsqueeze(-1)
+    axis = v / (2.0 * sin_theta)
 
-        # 5) axis-angle vector = axis * θ
-        rot_vec = axis * theta.unsqueeze(-1)
-        # un-flatten to (..., 3)
-        return rot_vec.view(R.shape[0], 3)
+    # 5) axis-angle vector = axis * θ
+    rot_vec = axis * theta.unsqueeze(-1)
+    # un-flatten to (..., 3)
+    return rot_vec.view(R.shape[0], 3)
 
 
 def r6d_to_rotation_matrix(r6d: torch.Tensor):

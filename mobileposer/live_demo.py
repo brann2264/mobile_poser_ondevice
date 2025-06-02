@@ -64,7 +64,6 @@ class IMUSet:
             data, addr = self._imu_socket.recvfrom(1024)
  
             data_str = data.decode("utf-8")
-            print(data_str)
             a = np.array(data_str.split("#")[0].split(",")).astype(np.float64)
             q = np.array(data_str.split("#")[1].strip("$").split(",")).astype(np.float64)
 
@@ -148,7 +147,7 @@ def get_input():
 def pack_tensor(tensor) -> bytes:
     arr = np.array(tensor, dtype=np.float32)
     shape = arr.shape
-    assert shape == (1, 45, 60) or shape == (1,), f"Shape mismatch: got {shape!r}"
+    # assert shape == (1, 45, 60) or shape == (1,), f"Shape mismatch: got {shape!r}"
     data = arr.tobytes()
     buf = struct.pack('<I', len(shape))
     for d in shape:
@@ -241,17 +240,17 @@ def reader_phone_loop(conn, model, poses, trans, unity_conn):
             result = unpacker.unpack_from_phone(data)
             if result is None:
                 continue
-            pose, pred_joints, vel, contact = result
-
+            pose, pred_joints, pred_tran, contact = result
+  
             # post processing model backbone outputs
-            output = model.process_outputs(pose, pred_joints, vel, contact)
+            # output = model.process_outputs(pred_pose, pred_joints, pred_vel, contact)
 
-            pred_pose = output[0] # [24, 3, 3]
-            pred_tran = output[2] # [3]
-
+            # pred_pose = output[0] # [24, 3, 3]
+            # pred_tran = output[2] # [3]
+            
             # convert rotmatrix to axis angle
-            pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
-
+            # pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
+            print("received results from phone")
             if unity_conn is not None:
                 s = ','.join(['%g' % v for v in pose]) + '#' + \
                     ','.join(['%g' % v for v in pred_tran]) + '$'
@@ -345,43 +344,46 @@ if __name__ == '__main__':
         # calibration
         clock.tick(datasets.fps)
         ori_raw, acc_raw = imu_set.get_current_buffer() # [buffer_len, 5, 4]
-        
+ 
         if ori_raw.shape == (0,):
-            print(ori_raw.shape)
-            print(acc_raw.shape)
+            print("Networking Error: Received empty tensor")
             continue
-        
-        ori_raw = quaternion_to_rotation_matrix(ori_raw).view(-1, n_imus, 3, 3)
-        glb_acc = (smpl2imu.matmul(acc_raw.view(-1, n_imus, 3, 1)) - acc_offsets).view(-1, n_imus, 3)
-        glb_ori = smpl2imu.matmul(ori_raw).matmul(device2bone)
-
-        # normalization 
-        _acc = glb_acc.view(-1, 5, 3)[:, [1, 4, 3, 0, 2]] / amass.acc_scale
-        _ori = glb_ori.view(-1, 5, 3, 3)[:, [1, 4, 3, 0, 2]]
-        acc = torch.zeros_like(_acc)
-        ori = torch.zeros_like(_ori)
-
-        # device combo
-        combo = 'rp'
-        c = amass.combos[combo]
-
-        if USE_PHONE_AS_WATCH:
-            # set watch value to phone
-            acc[:, [0]] = _acc[:, [3]]
-            ori[:, [0]] = _ori[:, [3]]
-        else:
-            # filter and concat input
-            acc[:, c] = _acc[:, c] 
-            ori[:, c] = _ori[:, c]
-        
-        imu_input = torch.cat([acc.flatten(1), ori.flatten(1)], dim=1)
+       
         # imu_input = torch.cat([_acc[:, c].flatten(1), _ori[:, c].flatten(1)], dim=1)
     
         # send input to iphone for on-device model prediction
         if args.on_device:
-            imu_input, imu_shape = model.process_inputs(imu_input.squeeze(0))
-            send_tensors([imu_input, imu_shape], phone_conn)
+            send_tensors([ori_raw, 
+                          acc_raw, 
+                          acc_offsets, 
+                          smpl2imu, 
+                          device2bone], phone_conn)
         else:
+            ori_raw = quaternion_to_rotation_matrix(ori_raw).view(-1, n_imus, 3, 3)
+            glb_acc = (smpl2imu.matmul(acc_raw.view(-1, n_imus, 3, 1)) - acc_offsets).view(-1, n_imus, 3)
+            glb_ori = smpl2imu.matmul(ori_raw).matmul(device2bone)
+
+            # normalization 
+            _acc = glb_acc.view(-1, 5, 3)[:, [1, 4, 3, 0, 2]] / amass.acc_scale
+            _ori = glb_ori.view(-1, 5, 3, 3)[:, [1, 4, 3, 0, 2]]
+
+            acc = torch.zeros_like(_acc)
+            ori = torch.zeros_like(_ori)
+
+            # device combo
+            combo = 'rw_rp'
+            c = amass.combos[combo]
+
+            if USE_PHONE_AS_WATCH:
+                # set watch value to phone
+                acc[:, [0]] = _acc[:, [3]]
+                ori[:, [0]] = _ori[:, [3]]
+            else:
+                # filter and concat input
+                acc[:, c] = _acc[:, c] 
+                ori[:, c] = _ori[:, c]
+            
+            imu_input = torch.cat([acc.flatten(1), ori.flatten(1)], dim=1)
 
             # predict pose and translation
             with torch.no_grad():

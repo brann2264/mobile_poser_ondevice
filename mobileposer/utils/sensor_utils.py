@@ -124,29 +124,12 @@ def process_data(message):
     return send_str, device_name, curr_acc, curr_ori, timestamps
 
 def matrix_to_quaternion_single(matrix: torch.Tensor) -> torch.Tensor:
-    """
-    Args
-    ----
-    matrix : torch.Tensor, shape (3, 3)
-             Rotation matrix  (rows are destination axes).
-
-    Returns
-    -------
-    quat   : torch.Tensor, shape (4,)  --  (w, x, y, z) with ||quat|| == 1
-    """
-
-    # ------------------------------
-    # 1.  Pull out the nine elements
-    # ------------------------------
     m00, m01, m02 = matrix[0, 0], matrix[0, 1], matrix[0, 2]
     m10, m11, m12 = matrix[1, 0], matrix[1, 1], matrix[1, 2]
     m20, m21, m22 = matrix[2, 0], matrix[2, 1], matrix[2, 2]
 
     one = matrix.new_tensor(1.0)
 
-    # -------------------------------------------------------
-    # 2.  Same four “absolute” terms as the original function
-    # -------------------------------------------------------
     q_abs = torch.sqrt(
         torch.clamp(
             torch.stack(
@@ -161,9 +144,6 @@ def matrix_to_quaternion_single(matrix: torch.Tensor) -> torch.Tensor:
         )
     )                                           # shape (4,)
 
-    # ---------------------------------------------------
-    # 3.  Build the four candidate quaternions (unnormal)
-    # ---------------------------------------------------
     quat_by_rijk = torch.stack(
         [
             torch.stack([q_abs[0] ** 2,
@@ -186,21 +166,13 @@ def matrix_to_quaternion_single(matrix: torch.Tensor) -> torch.Tensor:
         dim=0,                                   # shape (4, 4)
     )
 
-    # ---------------------------------------------------
-    # 4.  Divide each row by the same “safe” denominator
-    # ---------------------------------------------------
     floor = matrix.new_tensor(0.1)
     denom = 2.0 * torch.max(q_abs, floor)        # shape (4,)
     quat_candidates = quat_by_rijk / denom.unsqueeze(-1)
 
-    # ----------------------------------------------------------
-    # 5.  Pick the best‑conditioned row (largest q_abs element)
-    #     – use tensor‑indexing so the tracer records a gather
-    # ----------------------------------------------------------
     best_idx = torch.argmax(q_abs)               # tensor scalar
     quat = quat_candidates[best_idx]             # shape (4,)
 
-    # 6.  Normalize to exactly unit length and return (w, x, y, z)
     return quat / quat.norm(p=2)
 
 
