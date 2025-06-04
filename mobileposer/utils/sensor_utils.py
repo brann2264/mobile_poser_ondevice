@@ -1,6 +1,5 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from pytorch3d.transforms import quaternion_to_matrix, matrix_to_quaternion
 from collections import deque
 
 from mobileposer.config import *
@@ -47,8 +46,6 @@ class SensorData:
         self.raw_acc_buffer[device_id].append(curr_acc.flatten())
         self.raw_ori_buffer[device_id].append(curr_ori.flatten())
 
-        #bug? does not update timestamp
-        
         return curr_timestamp
     
     def calibrate(self):
@@ -123,74 +120,127 @@ def process_data(message):
 
     return send_str, device_name, curr_acc, curr_ori, timestamps
 
-def matrix_to_quaternion_single(matrix: torch.Tensor) -> torch.Tensor:
-    m00, m01, m02 = matrix[0, 0], matrix[0, 1], matrix[0, 2]
-    m10, m11, m12 = matrix[1, 0], matrix[1, 1], matrix[1, 2]
-    m20, m21, m22 = matrix[2, 0], matrix[2, 1], matrix[2, 2]
 
-    one = matrix.new_tensor(1.0)
+def quaternion_to_matrix(q: torch.Tensor) -> torch.Tensor:
+    """
+    Convert a quaternion into a 3×3 rotation matrix.
+    Expects q in the format [x, y, z, w] with shape (..., 4).
+    Returns a matrix of shape (..., 3, 3).
+    """
+    # Ensure q is a float tensor and normalize
+    q = q.to(dtype=torch.float32)
+    q = q / q.norm(dim=-1, keepdim=True)
 
-    q_abs = torch.sqrt(
-        torch.clamp(
-            torch.stack(
-                [
-                    one + m00 + m11 + m22,        # w‑candidate
-                    one + m00 - m11 - m22,        # x‑candidate
-                    one - m00 + m11 - m22,        # y‑candidate
-                    one - m00 - m11 + m22,        # z‑candidate
-                ]
-            ),
-            min=0.0,
-        )
-    )                                           # shape (4,)
+    x, y, z, w = q.unbind(-1)  # each has shape (...)
 
-    quat_by_rijk = torch.stack(
-        [
-            torch.stack([q_abs[0] ** 2,
-                         m21 - m12,
-                         m02 - m20,
-                         m10 - m01]),
-            torch.stack([m21 - m12,
-                         q_abs[1] ** 2,
-                         m10 + m01,
-                         m02 + m20]),
-            torch.stack([m02 - m20,
-                         m10 + m01,
-                         q_abs[2] ** 2,
-                         m12 + m21]),
-            torch.stack([m10 - m01,
-                         m20 + m02,
-                         m21 + m12,
-                         q_abs[3] ** 2]),
-        ],
-        dim=0,                                   # shape (4, 4)
-    )
+    # Compute products once
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    ww = w * w
+    xy = x * y
+    xz = x * z
+    xw = x * w
+    yz = y * z
+    yw = y * w
+    zw = z * w
 
-    floor = matrix.new_tensor(0.1)
-    denom = 2.0 * torch.max(q_abs, floor)        # shape (4,)
-    quat_candidates = quat_by_rijk / denom.unsqueeze(-1)
+    # Build the rotation matrix entries
+    m00 = ww + xx - yy - zz
+    m01 = 2 * (xy - zw)
+    m02 = 2 * (xz + yw)
 
-    best_idx = torch.argmax(q_abs)               # tensor scalar
-    quat = quat_candidates[best_idx]             # shape (4,)
+    m10 = 2 * (xy + zw)
+    m11 = ww - xx + yy - zz
+    m12 = 2 * (yz - xw)
 
-    return quat / quat.norm(p=2)
+    m20 = 2 * (xz - yw)
+    m21 = 2 * (yz + xw)
+    m22 = ww - xx - yy + zz
 
+    # Stack into shape (..., 3, 3)
+    row0 = torch.stack((m00, m01, m02), dim=-1)
+    row1 = torch.stack((m10, m11, m12), dim=-1)
+    row2 = torch.stack((m20, m21, m22), dim=-1)
+
+    return torch.stack((row0, row1, row2), dim=-2)
+
+
+def matrix_to_quaternion(R: torch.Tensor) -> torch.Tensor:
+    """
+    Convert a rotation matrix (shape (..., 3, 3)) into a quaternion [x,y,z,w].
+    Returns a tensor of shape (..., 4).
+    Uses the “trace” method.
+    """
+    # Assume R is float32
+    m00 = R[..., 0, 0]
+    m11 = R[..., 1, 1]
+    m22 = R[..., 2, 2]
+    trace = m00 + m11 + m22  # (...)
+
+    # Allocate q components
+    x = torch.empty_like(trace)
+    y = torch.empty_like(trace)
+    z = torch.empty_like(trace)
+    w = torch.empty_like(trace)
+
+    # Case 1: trace > 0
+    t0 = trace + 1.0
+    mask0 = trace > 0
+    if mask0.any():
+        s0 = torch.sqrt(t0[mask0]) * 2.0  # s = 4*w
+        w[mask0] = 0.25 * s0
+        x[mask0] = (R[..., 2, 1][mask0] - R[..., 1, 2][mask0]) / s0
+        y[mask0] = (R[..., 0, 2][mask0] - R[..., 2, 0][mask0]) / s0
+        z[mask0] = (R[..., 1, 0][mask0] - R[..., 0, 1][mask0]) / s0
+
+    # Case 2: R[0,0] is largest diagonal
+    mask1 = (~mask0) & (m00 > m11) & (m00 > m22)
+    if mask1.any():
+        t1 = 1.0 + m00[mask1] - m11[mask1] - m22[mask1]
+        s1 = torch.sqrt(t1) * 2.0  # s = 4*x
+        w[mask1] = (R[..., 2, 1][mask1] - R[..., 1, 2][mask1]) / s1
+        x[mask1] = 0.25 * s1
+        y[mask1] = (R[..., 0, 1][mask1] + R[..., 1, 0][mask1]) / s1
+        z[mask1] = (R[..., 0, 2][mask1] + R[..., 2, 0][mask1]) / s1
+
+    # Case 3: R[1,1] is largest diagonal
+    mask2 = (~mask0) & (~mask1) & (m11 > m22)
+    if mask2.any():
+        t2 = 1.0 - m00[mask2] + m11[mask2] - m22[mask2]
+        s2 = torch.sqrt(t2) * 2.0  # s = 4*y
+        w[mask2] = (R[..., 0, 2][mask2] - R[..., 2, 0][mask2]) / s2
+        x[mask2] = (R[..., 0, 1][mask2] + R[..., 1, 0][mask2]) / s2
+        y[mask2] = 0.25 * s2
+        z[mask2] = (R[..., 1, 2][mask2] + R[..., 2, 1][mask2]) / s2
+
+    # Case 4: R[2,2] is largest diagonal
+    mask3 = (~mask0) & (~mask1) & (~mask2)
+    if mask3.any():
+        t3 = 1.0 - m00[mask3] - m11[mask3] + m22[mask3]
+        s3 = torch.sqrt(t3) * 2.0  # s = 4*z
+        w[mask3] = (R[..., 1, 0][mask3] - R[..., 0, 1][mask3]) / s3
+        x[mask3] = (R[..., 0, 2][mask3] + R[..., 2, 0][mask3]) / s3
+        y[mask3] = (R[..., 1, 2][mask3] + R[..., 2, 1][mask3]) / s3
+        z[mask3] = 0.25 * s3
+
+    return torch.stack((x, y, z, w), dim=-1)
 
 def sensor2global(ori, acc, calibration_quats, device_id):
     """Convert the sensor data to the global inertial frame."""
     device_mean_quat = calibration_quats[device_id]
-    # device_mean_quat = torch.tensor(device_mean_quat, dtype=torch.float32)
-    # ori = torch.tensor(ori, dtype=torch.float32)
-    # acc = torch.tensor(acc, dtype=torch.float32)
+    device_mean_quat = torch.tensor(device_mean_quat, dtype=torch.float32)
+    ori = torch.tensor(ori, dtype=torch.float32)
+    acc = torch.tensor(acc, dtype=torch.float32)
 
-    # og_mat = quaternion_to_matrix(ori)
-    # global_inertial_frame = quaternion_to_matrix(device_mean_quat)
-    # global_mat = torch.matmul(global_inertial_frame.T, og_mat)         # R_g←s
-    # global_ori = matrix_to_quaternion_single(global_mat)          # (..., 4)
-    # acc_ref   = torch.matmul(og_mat, acc.unsqueeze(-1)).squeeze(-1)
-    # global_acc = torch.matmul(global_inertial_frame.T, acc_ref.unsqueeze(-1)).squeeze(-1)
+    og_mat = quaternion_to_matrix(ori)
+    global_inertial_frame = quaternion_to_matrix(device_mean_quat)
+    global_mat = torch.matmul(global_inertial_frame.T, og_mat)         # R_g←s
+    global_ori = matrix_to_quaternion(global_mat)          # (..., 4)
+    acc_ref   = torch.matmul(og_mat, acc.unsqueeze(-1)).squeeze(-1)
+    global_acc = torch.matmul(global_inertial_frame.T, acc_ref.unsqueeze(-1)).squeeze(-1)
 
-    # return np.array(global_ori), np.array(global_acc)
+    return np.array(global_ori), np.array(global_acc)
     
     og_mat = R.from_quat(ori).as_matrix() # rotation matrix from quaternion
     global_inertial_frame = R.from_quat(device_mean_quat).as_matrix()

@@ -235,21 +235,12 @@ def reader_phone_loop(conn, model, poses, trans, unity_conn):
                 print("Client disconnected.")
                 break
             
-            #unpack here
+            #unpack
             result = unpacker.unpack_from_phone(data)
             if result is None:
                 continue
             pose, pred_joints, pred_tran, contact = result
-  
-            # post processing model backbone outputs
-            # output = model.process_outputs(pred_pose, pred_joints, pred_vel, contact)
-
-            # pred_pose = output[0] # [24, 3, 3]
-            # pred_tran = output[2] # [3]
-            
-            # convert rotmatrix to axis angle
-            # pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
-            print("received results from phone")
+ 
             if unity_conn is not None:
                 s = ','.join(['%g' % v for v in pose]) + '#' + \
                     ','.join(['%g' % v for v in pred_tran]) + '$'
