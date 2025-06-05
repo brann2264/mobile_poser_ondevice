@@ -230,6 +230,7 @@ def reader_phone_loop(conn, model, poses, trans, unity_conn):
     unpacker = PhoneUnpacker()
     try:
         while True:
+            continue
             data = conn.recv(4096)
             if not data:
                 print("Client disconnected.")
@@ -290,7 +291,7 @@ if __name__ == '__main__':
     if args.on_device:
         server_for_phone = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_for_phone.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        server_for_phone.bind(('10.105.238.137', 8889))
+        server_for_phone.bind(('0.0.0.0', 8890))
         server_for_phone.listen(1)
         print('Server start. Waiting for phone to connect.')
         phone_conn, phone_addr = server_for_phone.accept()
